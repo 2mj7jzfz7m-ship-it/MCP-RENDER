@@ -1,30 +1,38 @@
-import subprocess
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import asyncio
+from mcp.server import Server
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.routing import Route
+import uvicorn
 
-app = FastAPI()
+# Inicializar el servidor MCP
+app_mcp = Server("mcp-ffmpeg-gabi")
 
-class CommandRequest(BaseModel):
-    command: str
+@app_mcp.list_tools()
+async def list_tools():
+    return []
 
-@app.get("/")
-def read_root():
-    return {"status": "MCP FFmpeg Server online"}
+# Configurar el transporte SSE para la nube
+sse = SseServerTransport("/messages")
 
-@app.post("/run-ffmpeg")
-def run_ffmpeg(req: CommandRequest):
-    try:
-        # Ejecuta un comando seguro de ffmpeg recibido desde la nube
-        # Nota: ajusta esto según los comandos específicos que necesites procesar
-        result = subprocess.run(
-            req.command, shell=True, capture_output=True, text=True, timeout=60
+async def handle_sse(request):
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await app_mcp.run(
+            streams[0], streams[1], app_mcp.create_initialization_options()
         )
-        if result.returncode != 0:
-            raise HTTPException(status_code=400, detail=result.stderr)
-        return {"output": result.stdout}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+async def handle_messages(request):
+    await sse.handle_post_message(request.scope, request.receive, request._send)
+
+# Crear la aplicación Starlette para Render
+starlette_app = Starlette(
+    routes=[
+        Route("/sse", endpoint=handle_sse),
+        Route("/messages", endpoint=handle_messages, methods=["POST"]),
+    ]
+)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(starlette_app, host="0.0.0.0", port=8000)
